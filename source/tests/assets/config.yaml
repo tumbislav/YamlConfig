@@ -1,0 +1,61 @@
+---
+# conf.yaml
+#
+#  a test configuration file
+#
+# author: Marko Čibej
+
+GLOBAL:
+  trace-frequency: 100000
+
+steps:
+  load:
+    parameters:
+      header-lines: 0
+      separator: '|'
+    rules:
+      archive-source: ^LOG$
+
+  classify:
+    parameters:
+      declared-types:
+        - FIZ  # fizična oseba
+    rules:
+      entrepreneur:
+        indicator:
+          score: 9
+          rule:
+            - DOPOLNILN.*DEJAVNOST|\bS\.P\.?|O\.P\.|PREDUZETNI
+      triggered:
+        employees:
+          trigger:
+            - PLAČILN|ZAP(\.|OSL).*|D\. *ČLAN|DRUŽ.*ČLAN|VSAKO[KRA]+T|POIMENSK|SODELAVEC|ČLANI
+          actions:
+            employment-agency:
+              rule:
+                - ZAPOSLITVENI (CENTER|SERVIS)|\bNEZAP
+              score:
+                association: 9
+            employee-list:
+              rule:
+                - VSAKO[KRA]+TNI?|IMENSKI SEZNA|DRUŽB
+              score:
+                reject: 1
+  normalize:
+    parameters:
+      domestic-country: SLOVENIJA
+    rules:
+      contact-info:
+        email-syntax: ^([-A-Z0-9_]+\.?)+@([-A-Z0-9_]+\.)*[A-Z]+$
+      provenance-map:
+        !!python/tuple [p, yes]: Domestic
+        !!python/tuple [p, no]: Foreign
+        !!python/tuple [l, yes]: Domestic
+        !!python/tuple [l, no]: Foreign
+
+  write:
+    parameters:
+      json-schema: schema.json
+    rules:
+      wrappers-f:
+        import:  ['{"Import":[', ']}']

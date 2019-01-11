@@ -1,0 +1,16 @@
+---
+# nested.yaml
+#
+# Configuration file with nested configs
+#
+# author: Marko Čibej
+
+__INCLUDE__:
+    from: sub-config.yaml
+
+from:
+    main:
+        file: yes
+
+steps:
+    one: no

@@ -1,0 +1,10 @@
+---
+# conf-with-errors.yaml
+#
+# testing conf file with Yaml errors
+#
+# author: Marko Čibej
+
+GLOBAL:
+    this is: 'just not right
+ 

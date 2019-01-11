@@ -7,14 +7,18 @@ __author__ = 'Marko Čibej'
 
 import importlib.resources
 import yaml
+from yaml.scanner import ScannerError
 from copy import deepcopy
-from typing import Union, List, Any
+from typing import List, Any, Optional
+from bisect import insort
 
 
-def dict_merge(target: dict, source: dict):
+def dict_merge(target: dict, source: dict) -> List:
     """
-    Recursively merges values from source into target.
-    stolen from https://github.com/halfak/yamlconf
+    Recursively merges values from source into target. Returns a list of point that were changed.
+    :param target: the trget dicti into which the changes were merged
+    :param source: the source of the changes
+    :return: the list of branches that were actually changed
     """
     for key in source:
         if key in target and isinstance(target[key], dict) and isinstance(source[key], dict):
@@ -42,10 +46,13 @@ def load_yaml(file_name: str = None, resource: str = None, package: str = None) 
         with importlib.resources.open_text(package, resource) as r:
             yaml_string = r.read()
 
-    the_map = yaml.load(yaml_string)
+    try:
+        the_map = yaml.load(yaml_string)
+    except yaml.scanner.ScannerError as e:
+        raise YcError('load_yaml: yaml scanner error {}'.format(e))
 
     if not isinstance(the_map, dict):
-        raise YcError('Yaml source should map to a dictionary {}'.format(the_map))
+        raise YcError('load_yaml: yaml source should map to a dictionary {}'.format(the_map))
 
     return the_map
 
@@ -82,7 +89,7 @@ class YamlConfig:
         if resource is None:
             resource = 'config.yaml'
         if package is None:
-            package = __name__ + '.assets'
+            package = 'assets'
 
         self.patch(resource=resource, package=package)
         self.validate()
@@ -92,8 +99,7 @@ class YamlConfig:
         Run validity checks on the configuration map. This is meant to be overridden in subclass.
         Raise an exception if validation fails.
         """
-        if 'steps' not in self.maps or not isinstance(self.maps['steps'], dict):
-            raise YcError('Configuration.load, missing steps section, or section is not a map')
+        pass
 
     def patch(self, file_name: str = None, resource: str = None, package: str = None,
               the_patch: dict = None, branch: str = None):
@@ -119,23 +125,39 @@ class YamlConfig:
         if the_patch is None:
             the_patch = load_yaml(file_name, resource, package)
             if file_name is not None:
-                self.patches.append({'type': 'file', 'file-name': file_name, 'branch': branch})
+                self.patches.append((branch, {'type': 'file', 'file-name': file_name}))
             else:
-                self.patches.append({'type': 'resource', 'resource': resource, 'package': package, 'branch': branch})
+                self.patches.append((branch, {'type': 'resource', 'resource': resource, 'package': package}))
         else:
-            self.patches.append({'type': 'patch', 'branch': branch})
+            self.patches.append((branch, {'type': 'patch'}))
 
         dict_merge(target, the_patch)
 
         if '__INCLUDE__' in target:
-            for sub_branch, location in target['__INCLUDE__'].items():
+            includes = target['__INCLUDE__']
+            del target['__INCLUDE__']
+            for sub_branch, location in includes.items():
                 if file_name is not None:
                     self.patch(file_name=location, branch=branch + '.' + sub_branch)
                 else:
-                    self.patch(resource=location, package=package, branch=branch + '.' + sub_branch)
-            del target['__INCLUDE__']
+                    self.patch(resource=location, package=package,
+                               branch=(branch + '.' if branch is not None else '') + sub_branch)
 
-    def get_section(self, section: str, must_exist=False) -> Any:
+    def register_patch(self, branch, source):
+
+    def save(self, all_to_root: bool = False, file_name: str = None) -> Optional[list]:
+        """
+        Saves changed values to the files where they came from. Elements from non
+        :param all_to_root: ignore patched branches and save everything to the root file
+        :param file_name: save to the named file rather than the original one; only applies to the root, unless
+                          all_to_root is also set
+        :return: the list of branches not saved, or None
+        """
+        self.patches.sort(key=lambda x: x[0])
+
+        return None
+
+    def get_section(self, section: str, must_exist=False) -> dict:
         """
         Get a section of the configuration, potentially many levels deep.
 
@@ -151,8 +173,8 @@ class YamlConfig:
                 found = None
                 break
 
-        if must_exist and found is None:
-            raise YcError('Configuration.get_section, section {} not found'.format(section))
+        if must_exist and (found is None or not isinstance(found, dict)):
+            raise YcError('YamlConfig.get_section, section {} not found or not a dict'.format(section))
 
         return found
 
@@ -172,60 +194,44 @@ class YamlConfig:
 
         return default
 
-    def get_rule_set(self, step: str, key: str) -> Union[str, dict]:
+    def set_value(self, section: str, key: str, value: Any) -> Any:
         """
-        Get a rule set for a processing step.
+        Changes the value of an existing parameter. The replacement value can be anything, so this is a
+        way to depen the structure without using patch.
+        :param section: the section where the parameter is to be found
+        :param key: the parameter's key
+        :param value: the new value
+        :return: the previous value, if any
+        """
+        pass
 
-        :param step: the step for which to retrieve the rule set
-        :param key: rule set key
-        :return: a dictionary containing the rules
+    def __iter__(self):
         """
-        return self.get_section('.'.join(['steps', step, 'rules', key]), True)
+        Identifies the object as an iterator. If no iteration is active, begins a depth-first traverse
+        of self.maps
+        :return: self
+        """
+        return self
 
-    def get_parameter(self, step: str, key: str, default=None) -> Any:
+    def __next__(self):
         """
-        Get a parameter for the processing step. If the parameter is not defined, return the default.
+        Get the next element of the current iteration.
+        :return: the element
+        """
+        pass
 
-        :param step: the step for which to retrieve the parameter
-        :param key: parameter key
-        :param default: the value returned if the parameter is undefined
-        :return: the parameter values
+    def branch(self, section):
         """
-        return self.get_value('.'.join(['steps', step, 'parameters']), key, default)
+        Begin iteration over members of a sub-dir.
+        :param section: the path to the sub-dir
+        :return: self
+        """
+        pass
 
-    def set_parameter(self, step: str, key: str, value: Any) -> Any:
+    def list(self, section):
         """
-        Set a parameter, to permit on-the-fly reconfiguration. If the appropriate parameters section doesn't exist,
-        an exception is thrown.
-
-        :param step: the step for which to retrieve the parameter
-        :param key: parameter key
-        :param value: the new value of the parameter
-        :return: the previous value of the parameter, if it exists
+        Begin iteration over a list.
+        :param section: the path to the list
+        :return: self
         """
-        param_section = self.get_section('.'.join(['steps', step, 'parameters']), True)
-        old_value = param_section[key] if key in param_section else None
-        param_section[key] = value
-        return old_value
-
-    def set_global(self, param: str, value: Any) -> Any:
-        """
-        Set the value of a global parameter.
-        :param param: the parameter name
-        :param value: the parameter value
-        :return: the previous value of the parameter, if any
-        """
-        previous = self.maps['GLOBAL'][param] if param in self.maps['GLOBAL'] else None
-        self.maps['GLOBAL'][param] = value
-        return previous
-
-    def get_global(self, param: str, default: Any = None) -> Any:
-        """
-        Retrieve the value of a global parameter.
-        :param param: the parameter name
-        :param default: the default value; if it is None and if the parameter is not present, an exception is raised
-        :return: the value of the parameter or the default
-        """
-        if param not in self.maps['GLOBAL'] and default is None:
-            raise YcError('Configuration.get_global, parameter {} not set and no default given'.format(param))
-        return self.maps['GLOBAL'][param] if param in self.maps['GLOBAL'] else default
+        pass
