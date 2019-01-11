@@ -13,18 +13,21 @@ from typing import List, Any, Optional
 from bisect import insort
 
 
-def dict_merge(target: dict, source: dict) -> List:
+def dict_merge(target: dict, source: dict, changes: List, current_path: str):
     """
     Recursively merges values from source into target. Returns a list of point that were changed.
-    :param target: the trget dicti into which the changes were merged
+    :param target: the target dict into which the changes were merged
     :param source: the source of the changes
+    :param changed: the list of actually changed branches
+    :param current_path: the current concatenation of path elements, used for updating _changed_
     :return: the list of branches that were actually changed
     """
     for key in source:
         if key in target and isinstance(target[key], dict) and isinstance(source[key], dict):
-            dict_merge(target[key], source[key])
+            dict_merge(target[key], source[key], changes, current_path + '.' + key)
         else:
             target[key] = deepcopy(source[key])
+            changes.append(current_path + '.' + key)
 
 
 def load_yaml(file_name: str = None, resource: str = None, package: str = None) -> dict:
@@ -125,13 +128,16 @@ class YamlConfig:
         if the_patch is None:
             the_patch = load_yaml(file_name, resource, package)
             if file_name is not None:
-                self.patches.append((branch, {'type': 'file', 'file-name': file_name}))
+                source = {'type': 'file', 'file-name': file_name}
             else:
-                self.patches.append((branch, {'type': 'resource', 'resource': resource, 'package': package}))
+                source = {'type': 'resource', 'resource': resource, 'package': package}
         else:
-            self.patches.append((branch, {'type': 'patch'}))
+            source = {'type': 'patch'}
 
-        dict_merge(target, the_patch)
+        changes = []
+        dict_merge(target, the_patch, changes, branch)
+        for change in changes:
+            insort(self.patches, (change, source))
 
         if '__INCLUDE__' in target:
             includes = target['__INCLUDE__']
