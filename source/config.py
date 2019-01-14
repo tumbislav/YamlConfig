@@ -9,7 +9,7 @@ import importlib.resources
 import yaml
 from yaml.scanner import ScannerError
 from copy import deepcopy
-from typing import List, Any, Optional
+from typing import List, Any, Tuple
 from bisect import insort
 
 
@@ -18,16 +18,16 @@ def dict_merge(target: dict, source: dict, changes: List, current_path: str):
     Recursively merges values from source into target. Returns a list of point that were changed.
     :param target: the target dict into which the changes were merged
     :param source: the source of the changes
-    :param changed: the list of actually changed branches
+    :param changes: the list of actually changed branches
     :param current_path: the current concatenation of path elements, used for updating _changed_
     :return: the list of branches that were actually changed
     """
     for key in source:
         if key in target and isinstance(target[key], dict) and isinstance(source[key], dict):
-            dict_merge(target[key], source[key], changes, current_path + '.' + key)
+            dict_merge(target[key], source[key], changes, key if current_path == '' else '.'.join([current_path, key]))
         else:
             target[key] = deepcopy(source[key])
-            changes.append(current_path + '.' + key)
+            changes.append(current_path)
 
 
 def load_yaml(file_name: str = None, resource: str = None, package: str = None) -> dict:
@@ -70,31 +70,37 @@ class YamlConfig:
     """
     maps: dict
     config_file_name: str
-    patches: List
+    patch_locations: List
+    patch_list: List[dict]
 
-    def __init__(self, file_name: str = None, resource: str = None, package: str = None):
+    def __init__(self, file_name: str = None, resource: str = None, package: str = None, patch_dict: dict = None):
         """
-        Loads the starting configuration.
+        Sets up an empty object and loads the starting configuration.
 
-        Essentially sets up an empty object, defaults resource to 'config.yaml' and package to __name__ + '.assets',
-        ten passes the loading to patch(). No exceptions are handled, we shouldn't make assumptions about the
-        caller's intents.
+        Exactly one initializer is used. If the dict is used if present; if not, the file is loaded. If that
+        is not given, the resource is loaded. The resource name and location default to 'assets/config.yaml'.
 
-        :param file_name: see load_config
-        :param resource: see load_config
-        :param package: see load_config
+        No exceptions are handled, we shouldn't make assumptions about the caller's intent.
+
+        :param file_name: see patch()
+        :param resource: see patch()
+        :param package: see patch()
+        :param patch_dict: see patch()
         """
-        self.patches = []
+        self.patch_locations = []
+        self.patch_list = []
         self.maps = {}
 
-        if file_name is not None:
+        if patch_dict is not None:
+            self.patch(patch_dict=patch_dict)
+        elif file_name is not None:
             self.patch(file_name=file_name)
-        if resource is None:
-            resource = 'config.yaml'
-        if package is None:
-            package = 'assets'
-
-        self.patch(resource=resource, package=package)
+        else:
+            if resource is None:
+                resource = 'config.yaml'
+            if package is None:
+                package = 'assets'
+            self.patch(resource=resource, package=package)
         self.validate()
 
     def validate(self):
@@ -105,7 +111,7 @@ class YamlConfig:
         pass
 
     def patch(self, file_name: str = None, resource: str = None, package: str = None,
-              the_patch: dict = None, branch: str = None):
+              patch_dict: dict = None, branch: str = None):
         """
         Recursively load the configuration from a file or a resource or an explicitly given source.
         Store the patch parameters.
@@ -113,7 +119,7 @@ class YamlConfig:
         :param file_name: see load_yaml
         :param resource: see load_yaml
         :param package: when there are includes to process and package is not None, nested loads use the same package.
-        :param the_patch: a source dict if it is given explicitly
+        :param patch_dict: a source dict if it is given explicitly
         :param branch: a dot-separated address of the branch where the patch is to be applied
         """
 
@@ -124,20 +130,26 @@ class YamlConfig:
                     target = target[key]
                 else:
                     raise YcError('Cannot locate branch {}'.format(branch))
+        else:
+            branch = ''
 
-        if the_patch is None:
+        patch_location = len(self.patch_list)
+        if patch_dict is not None:
+            the_patch = patch_dict
+            self.patch_list.append({'type': 'dict', 'branch': branch, 'changed': False, 'patch': the_patch})
+        else:
             the_patch = load_yaml(file_name, resource, package)
             if file_name is not None:
-                source = {'type': 'file', 'file-name': file_name}
+                self.patch_list.append({'type': 'file', 'file-name': file_name,
+                                        'branch': branch, 'changed': False, 'patch': the_patch})
             else:
-                source = {'type': 'resource', 'resource': resource, 'package': package}
-        else:
-            source = {'type': 'patch'}
+                self.patch_list.append({'type': 'resource', 'resource': resource, 'package': package,
+                                        'branch': branch, 'changed': False, 'patch': the_patch})
 
         changes = []
         dict_merge(target, the_patch, changes, branch)
         for change in changes:
-            insort(self.patches, (change, source))
+            insort(self.patch_locations, (change, patch_location))
 
         if '__INCLUDE__' in target:
             includes = target['__INCLUDE__']
@@ -146,33 +158,48 @@ class YamlConfig:
                 if file_name is not None:
                     self.patch(file_name=location, branch=branch + '.' + sub_branch)
                 else:
-                    self.patch(resource=location, package=package,
-                               branch=(branch + '.' if branch is not None else '') + sub_branch)
+                    self.patch(resource=location, package=package, branch=(branch + '.' if branch else '') + sub_branch)
 
-    def register_patch(self, branch, source):
-
-    def save(self, all_to_root: bool = False, file_name: str = None) -> Optional[list]:
+    def save(self, all_to_root: bool = False, file_name: str = None) -> List:
         """
-        Saves changed values to the files where they came from. Elements from non
+        Saves changed values to the files where they came from. Elements from patches that are not
         :param all_to_root: ignore patched branches and save everything to the root file
         :param file_name: save to the named file rather than the original one; only applies to the root, unless
                           all_to_root is also set
-        :return: the list of branches not saved, or None
+        :return: the list of patches considered and
         """
-        self.patches.sort(key=lambda x: x[0])
+        results = []
+        for patch in self.patch_list:
+            if patch['type'] == 'dict':
+                results.append({'type': 'dict', 'branch': patch['branch'], 'changed': patch['changed'], 'saved': False})
+            elif patch['type'] == 'resource':
+                results.append({'type': 'resource', 'branch': patch['branch'], 'resource': patch['resource'],
+                                'package': patch['package'], 'changed': patch['changed'], 'saved': False})
+            else:
+                if not patch['changed']:
+                    results.append({'type': 'file', 'branch': patch['branch'], 'file-name': patch['file-name'],
+                                    'changed': patch['changed'], 'saved': False})
+                else:
+                    try:
+                        with open(file_name, 'w', encoding='utf-8') as f:
+                            yaml.dump(patch['patch'], f)
+                        results.append({'type': 'file', 'branch': patch['branch'], 'file-name': patch['file-name'],
+                                        'changed': patch['changed'], 'saved': True})
+                    except Exception as e:
+                        results.append({'type': 'file', 'branch': patch['branch'], 'file-name': patch['file-name'],
+                                        'changed': patch['changed'], 'saved': False, 'error': str(e)})
+        return results
 
-        return None
-
-    def get_section(self, section: str, must_exist=False) -> dict:
+    def get_section(self, path: str, must_exist=False) -> dict:
         """
         Get a section of the configuration, potentially many levels deep.
 
-        :param section: a section name or an array of section names, the path to the section sought
+        :param path: a section name or an array of section names, the path to the section sought
         :param must_exist: whether the method throws an exception if the section is not found
         :return: the section found or None
         """
         found = self.maps
-        for s in section.split('.'):
+        for s in path.split('.'):
             if s in found:
                 found = found[s]
             else:
@@ -180,36 +207,68 @@ class YamlConfig:
                 break
 
         if must_exist and (found is None or not isinstance(found, dict)):
-            raise YcError('YamlConfig.get_section, section {} not found or not a dict'.format(section))
+            raise YcError('YamlConfig.get_section, path {} not found or not a dict'.format(path))
 
         return found
 
-    def get_value(self, section: str, key: str, default=None) -> Any:
+    def get_value(self, path: str, key: str, default=None) -> Any:
         """
         Get a  parameter within a section.
 
-        :param section: the path to the section
+        :param path: the path to the section
         :param key: the key of the section
         :param default: the default value, if the section or the key is not found
         :return: the value found or default
         """
-        sect = self.get_section(section)
-        if sect is not None:
-            if key in sect:
-                return sect[key]
+        branch = self.get_section(path)
+        if branch is not None:
+            if key in branch:
+                return branch[key]
 
         return default
 
-    def set_value(self, section: str, key: str, value: Any) -> Any:
+    def set_value(self, path: str, key: str, value: Any) -> Tuple[Any, bool]:
         """
-        Changes the value of an existing parameter. The replacement value can be anything, so this is a
-        way to depen the structure without using patch.
-        :param section: the section where the parameter is to be found
+        Changes the value of an existing parameter. The change is made in two locations, in self.maps which is
+        the current, consolidated version of the configuration, and in the stored patch where the value originated.
+        Raises an exception if the path is not found, or if the original patch is not found.
+
+        The replacement must be a leaf value, i.e. not a dict -- to attach a dict, use patch().
+        The original value must exist.
+
+        :param path: the section where the parameter is to be found
         :param key: the parameter's key
         :param value: the new value
-        :return: the previous value, if any
+        :return: the previous value and whether the patch can be saved
         """
-        pass
+        if isinstance(value, dict):
+            raise YcError('YamlConfig.setValue, replacement value for {} may not be a dict'.format(key))
+
+        loc = len(self.patch_locations) + 1
+        for loc, pair in enumerate(reversed(self.patch_locations)):
+            if pair[0] == path[:len(pair[0])]:
+                break
+        loc = len(self.patch_locations) - loc - 1
+        if loc != 0 and self.patch_locations[loc][0] != path:
+            raise YcError('YamlConfig.get_patch, patch for path at {} not found'.format(path))
+
+        patch = self.patch_list[self.patch_locations[loc][1]]
+        prefix = patch['branch']
+        if len(path) < len(prefix) or path[:len(prefix)] != prefix:
+            raise YcError('YamlConfig.get_patch, branch prefix {} is not a prefix to path {}'.format(path, prefix))
+        patch_node = patch['patch']
+        if len(path) > len(prefix):
+            for node in path[len(patch['branch']):].split('.'):
+                if node not in patch_node:
+                    raise YcError('YamlConfig.get_patch, unable to trace path at node {}'.format(node))
+                patch_node = patch_node[node]
+        patch_node[key] = value
+        patch['changed'] = True
+
+        section = self.get_section(path, True)
+        previous, section[key] = section[key], value
+
+        return previous, patch['type'] == 'file'
 
     def __iter__(self):
         """
@@ -226,18 +285,10 @@ class YamlConfig:
         """
         pass
 
-    def branch(self, section):
+    def traverse_branch(self, path):
         """
         Begin iteration over members of a sub-dir.
-        :param section: the path to the sub-dir
-        :return: self
-        """
-        pass
-
-    def list(self, section):
-        """
-        Begin iteration over a list.
-        :param section: the path to the list
+        :param path: the path to the sub-dir
         :return: self
         """
         pass

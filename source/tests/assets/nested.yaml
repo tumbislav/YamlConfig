@@ -6,11 +6,11 @@
 # author: Marko Čibej
 
 __INCLUDE__:
-    from: sub-config.yaml
+  from: sub-config.yaml
 
 from:
-    main:
-        file: yes
+  main:
+    file: yes
 
 steps:
-    one: no
+  one: no

@@ -18,7 +18,10 @@ class TestConfiguration(unittest.TestCase):
         """
         Test the basic loading of the configuration file.
         """
-        YamlConfig()  # load from the default location
+        conf = YamlConfig()  # load from the default location
+        self.assertEqual(conf.patch_list[0]['type'], 'resource')
+        self.assertEqual(conf.patch_list[0]['resource'], 'config.yaml')
+        self.assertEqual(conf.patch_list[0]['package'], 'assets')
         self.assertRaises(FileNotFoundError, YamlConfig, 'no-such-file.yaml')  # missing file
         self.assertRaises(YcError, YamlConfig,
                           **{'resource': 'yaml-with-errors.yaml', 'package': 'tests.assets'})  # invalid yaml
@@ -33,15 +36,6 @@ class TestConfiguration(unittest.TestCase):
         self.assertEqual(conf.get_value('from.other', 'file'), 'possibly')
         self.assertEqual(conf.get_value('from.other', 'not-a-file'), 'is no file')
 
-    def test_global(self):
-        """
-        Access to the 'GLOBAL' section. nested.yaml does not have a GLOBAL section, so it must be created at load.
-        """
-        conf = YamlConfig(resource='config.yaml', package='tests.assets')
-        conf.set_global('new-param', 3)
-        self.assertEqual(conf.get_global('new-param'), 3)
-        self.assertRaises(YcError, conf.get_global, 'some-other-param')
-
     def test_section_and_param(self):
         """
         General access to sections and values, without assumptions of how they are structured.
@@ -52,14 +46,13 @@ class TestConfiguration(unittest.TestCase):
         self.assertEqual(d, {'json-schema': 'schema.json'})
         self.assertEqual(conf.get_value('steps.write.parameters', 'json-schema'), 'schema.json')
 
-    def test_steps(self):
+    def test_set_value(self):
         """
-        Properly structured conf contains the following structure:
-            {steps: {step1: {parameters: {parameter1: value1, ...}, rules: {rule_set_1: ..., ...}}}}
-        YamlConfig has special methods for accessing these structures.
+        Test the changing of individual values.
         """
-        conf = YamlConfig(resource='config.yaml', package='tests.assets')
-        self.assertEqual(conf.get_rule_set('load', 'archive-source'), '^LOG$')
-        self.assertEqual(conf.get_parameter('load', 'separator'), '|')
-        self.assertIsNone(conf.set_parameter('load', 'new-parameter', 33))
-        self.assertEqual(conf.get_parameter('load', 'new-parameter'), 33)
+        conf = YamlConfig(patch_dict={'root': {'branch': {'value': 0}}})
+        previous, updatable = conf.set_value('root.branch', 'value', 2)
+        self.assertEqual(previous, 0)
+        self.assertFalse(updatable)
+        self.assertEqual(conf.get_value('root.branch', 'value'), 2)
+        result = conf.save()

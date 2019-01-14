@@ -6,10 +6,10 @@
 # author: Marko Čibej
 
 sub:
-    file: yes
+  file: yes
 other:
-    file: possibly
+  file: possibly
 
 
 __INCLUDE__:
-    other: sub-sub-config.yaml
+  other: sub-sub-config.yaml
